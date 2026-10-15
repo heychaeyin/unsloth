@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Temporary benchmark workflow. Exclude this file from the implementation PR.
+name: Temporary frontend browser benchmark
+
+on:
+  push:
+    branches: [codex/benchmark-frontend-browser-groups]
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    if: github.repository == 'heychaeyin/unsloth'
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 3
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Upgrade npm to 11.x
+        timeout-minutes: 3
+        run: |
+          npm install -g npm@^11 --no-fund --no-audit
+          V=$(npm -v)
+          case "$V" in
+            11.1[6-9].*|11.[2-9][0-9].*|1[2-9].*) echo "npm $V has allowScripts" ;;
+            *) echo "::error::npm $V lacks allowScripts (need >=11.16)"; exit 1 ;;
+          esac
+
+      - name: Check the lockfile before installation
+        run: |
+          python3 scripts/lockfile_supply_chain_audit.py
+          python3 tests/studio/test_sync_allow_scripts_pins.py
+          python3 scripts/sync_allow_scripts_pins.py --check
+
+      - name: Install frontend dependencies
+        working-directory: studio/frontend
+        timeout-minutes: 10
+        run: npm ci --strict-allow-scripts --no-fund --no-audit
+
+      - name: Check that installation preserved the frontend files
+        run: git diff --exit-code -- studio/frontend
+
+      - name: Install Python test dependencies
+        timeout-minutes: 3
+        run: python3 -m pip install 'playwright>=1.45,<2' pytest pyyaml==6.0.2
+
+      # Match the frontend job: bound downloads and install OS libraries only if needed.
+      - name: Install and check Chromium
+        timeout-minutes: 33
+        env:
+          RETRY_ATTEMPTS: '2'
+          RETRY_ATTEMPT_TIMEOUT: '420'
+          APT_ACQUIRE_RETRIES: '0'
+        run: |
+          bash .github/scripts/retry-with-apt-lock.sh python3 -m playwright install chromium
+          probe() {
+            python3 - <<'PY'
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as playwright:
+              browser = playwright.chromium.launch()
+              browser.close()
+          PY
+          }
+          if ! probe; then
+            bash .github/scripts/retry-with-apt-lock.sh python3 -m playwright install-deps chromium
+            probe
+          fi
+
+      - name: Compare serial and parallel browser checks
+        timeout-minutes: 25
+        run: python3 .github/scripts/benchmark-frontend-browser-groups.py
+
+      - name: Upload all benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: temporary-frontend-browser-benchmark
+          path: |
+            benchmark-results/
+            logs/
+            !benchmark-results/caches/**
+          retention-days: 3
+          if-no-files-found: warn
